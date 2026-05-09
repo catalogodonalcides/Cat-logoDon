@@ -163,7 +163,7 @@ var toastTimer=null;
 function showToast(msg){var t=$("toast");var btn='<button style="background:none;border:none;color:#b59a6a;font-size:12px;font-weight:600;cursor:pointer;margin-left:12px;touch-action:manipulation;" onclick="openCart()">Ver carrinho &rarr;</button>';t.innerHTML=msg+btn;t.classList.add("show");if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.classList.remove("show");},3000);}
 /* ---- addToCartQty (replaces addToCart with qty support) ---- */
 function addToCartQty(ck,idx,qty){var p=products[ck][idx];var cn=CATEGORIES[ck];var ex=cart.find(function(item){return item.name===p.name&&item.category===cn;});if(ex)ex.qty+=qty;else cart.push({name:p.name,price:p.price,category:cn,img:p.img,qty:qty});updateCartCount();renderCart();showToast("✓ "+p.name+" adicionado"+(qty>1?" (×"+qty+")":""));}
-document.addEventListener("DOMContentLoaded",function(){document.getElementById("productModal").querySelector(".modal-close").addEventListener("click",closeProductModal);document.getElementById("productModal").addEventListener("click",function(e){if(e.target===this)closeProductModal();});document.querySelectorAll("[data-cat]").forEach(function(btn){btn.addEventListener("click",function(){goToCategory(btn.dataset.cat);});});renderGrid();});
+document.addEventListener("DOMContentLoaded",function(){document.getElementById("productModal").querySelector(".modal-close").addEventListener("click",closeProductModal);document.getElementById("productModal").addEventListener("click",function(e){if(e.target===this)closeProductModal();});});
 
 
 
@@ -251,8 +251,26 @@ function loadFromFirestore() {
     fbStatus('');
     setTimeout(function(){ document.getElementById('fbLoadingBar').style.width='0'; }, 600);
   }).catch(function(err) {
-    fbStatus('Erro ao carregar: ' + err.message);
     console.error(err);
+    var isPermission = err.code === 'permission-denied' || (err.message && err.message.toLowerCase().includes('permission'));
+    if (isPermission) {
+      fbStatus('');
+      setLoading(0);
+      document.getElementById('productGrid').innerHTML =
+        '<div class="empty-state" style="max-width:520px;margin:0 auto;text-align:left;padding:32px 24px;">' +
+        '<p style="font-size:15px;font-weight:600;color:#1a1a1a;margin-bottom:8px;">⚠️ Acesso bloqueado pelo Firestore</p>' +
+        '<p style="font-size:13px;color:#555;margin-bottom:16px;">As regras de segurança do Firebase estão impedindo a leitura pública do catálogo. Siga os passos abaixo para liberar:</p>' +
+        '<ol style="font-size:13px;color:#333;line-height:2;padding-left:18px;">' +
+        '<li>Acesse <a href="https://console.firebase.google.com/project/catalogodon/firestore/rules" target="_blank" style="color:#b59a6a;">console.firebase.google.com</a></li>' +
+        '<li>Vá em <strong>Firestore Database → Regras</strong></li>' +
+        '<li>Substitua o conteúdo pelas regras abaixo e clique em <strong>Publicar</strong></li>' +
+        '</ol>' +
+        '<pre style="background:#f0f0f0;border-radius:5px;padding:14px;font-size:12px;margin-top:12px;overflow-x:auto;white-space:pre-wrap;">rules_version = \'2\';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n\n    // Leitura pública — qualquer um pode ver categorias e produtos\n    match /categories/{catId} {\n      allow read: if true;\n      allow write: if false; // apenas pelo console/admin\n    }\n    match /products/{prodId} {\n      allow read: if true;\n      allow write: if false;\n    }\n  }\n}</pre>' +
+        '<p style="font-size:12px;color:#9e9e9e;margin-top:12px;">As operações de escrita (admin) continuam protegidas. Apenas a <em>leitura</em> se torna pública.</p>' +
+        '</div>';
+    } else {
+      fbStatus('Erro ao carregar: ' + err.message);
+    }
   });
 }
 
@@ -469,7 +487,12 @@ function saveEdit(cat, idx) {
   }).catch(function(err){
     btn.innerHTML = 'Salvar';
     btn.disabled  = false;
-    alert('Erro ao salvar: ' + err.message);
+    if (err.code === 'permission-denied') {
+      alert('\u26a0\ufe0f Permissao negada.\nNo Firebase Console > Firestore > Regras, troque "allow write: if false" por "allow write: if true" nas duas colecoes.');
+    } else {
+      alert('Erro ao salvar: ' + err.message);
+    }
+    btn.innerHTML = 'Salvar'; btn.disabled = false;
   });
 }
 
@@ -481,9 +504,19 @@ function deleteProduct(cat, idx) {
     products[cat].splice(idx, 1);
     renderAdminProducts();
     if (currentCat === cat) renderGrid();
-    showToast('Produto removido');
+    showToast('\u2713 Produto removido');
   };
-  p.id ? db.collection('products').doc(p.id).delete().then(done) : done();
+  if (p.id) {
+    db.collection('products').doc(p.id).delete().then(done).catch(function(err){
+      if (err.code === 'permission-denied') {
+        alert('\u26a0\ufe0f Permissao negada pelo Firestore.\n\nAtualize as regras no Firebase Console:\nFirestore > Regras\n\nTroque "allow write: if false" por "allow write: if true"\nnas duas colecoes (categories e products).');
+      } else {
+        alert('Erro ao remover: ' + err.message);
+      }
+    });
+  } else {
+    done();
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -611,47 +644,48 @@ var WN="5515981151299";var ORIGINAL_CATEGORIES={"pomada-po":"Pomada em Pó","gro
 
 function migrateIfEmpty() {
   db.collection('categories').limit(1).get().then(function(snap) {
-    if (!snap.empty) return; // já tem dados, não migra
+    if (!snap.empty) {
+      // Ja tem dados — carrega direto
+      loadFromFirestore();
+      return;
+    }
+
     fbStatus('Migrando produtos pela primeira vez…');
     console.log('Firestore vazio — iniciando migração dos produtos originais…');
 
     var batch = db.batch();
     var catKeys = Object.keys(ORIGINAL_CATEGORIES);
-
     catKeys.forEach(function(k, i) {
       var ref = db.collection('categories').doc(k);
       batch.set(ref, { name: ORIGINAL_CATEGORIES[k], order: i });
     });
 
-    return batch.commit();
-  }).then(function() {
-    // Migra produtos em lotes
-    var catKeys = Object.keys(ORIGINAL_CATEGORIES);
-    var chain = Promise.resolve();
-
-    catKeys.forEach(function(catKey) {
-      var prods = ORIGINAL_PRODUCTS[catKey] || [];
-      chain = chain.then(function() {
-        var b = db.batch();
-        prods.forEach(function(p, i) {
-          var ref = db.collection('products').doc();
-          b.set(ref, {
-            name: p.name || '',
-            price: p.price || '',
-            desc: p.desc || '',
-            img: p.img || '',
-            categoryKey: catKey,
-            order: i
+    return batch.commit().then(function() {
+      var chain = Promise.resolve();
+      catKeys.forEach(function(catKey) {
+        var prods = ORIGINAL_PRODUCTS[catKey] || [];
+        chain = chain.then(function() {
+          var b = db.batch();
+          prods.forEach(function(p, i) {
+            var ref = db.collection('products').doc();
+            b.set(ref, {
+              name: p.name || '',
+              price: p.price || '',
+              desc: p.desc || '',
+              img: p.img || '',
+              categoryKey: catKey,
+              order: i
+            });
           });
+          return b.commit();
         });
-        return b.commit();
       });
+      return chain;
+    }).then(function() {
+      fbStatus('');
+      loadFromFirestore();
     });
 
-    return chain;
-  }).then(function() {
-    fbStatus('');
-    loadFromFirestore();
   }).catch(function(e) {
     console.error('Erro na migração:', e);
     fbStatus('');
