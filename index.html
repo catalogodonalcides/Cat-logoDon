@@ -50,6 +50,37 @@
 
 *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
 
+/* ── BULK DELETE ────────────────────────────────────────── */
+.admin-bulk-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; margin-bottom: 12px;
+  background: var(--parchment-dk); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.admin-bulk-bar label {
+  font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--ink-muted);
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+}
+.admin-bulk-bar input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: var(--burgundy); }
+.admin-bulk-count { font-size: 12px; color: var(--ink-muted); margin-left: auto; }
+.admin-bulk-del-btn {
+  background: var(--burgundy); color: var(--ivory); border: none;
+  padding: 8px 18px; border-radius: var(--radius-sm); cursor: pointer;
+  font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase;
+  transition: var(--transition); opacity: 0; pointer-events: none;
+}
+.admin-bulk-del-btn.visible { opacity: 1; pointer-events: auto; }
+.admin-bulk-del-btn:hover { background: var(--burgundy-dk); }
+.admin-prod-item { position: relative; }
+.admin-prod-check {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; cursor: pointer; accent-color: var(--burgundy);
+  z-index: 2;
+}
+.admin-prod-item.checked { background: rgba(139,26,42,.06); border-color: var(--burgundy-lt); }
+
 /* ── BODY + TEXTURA VINTAGE ────────────────────────────
    Fundo parchment com grain sutil — papel envelhecido
    ──────────────────────────────────────────────────── */
@@ -967,9 +998,20 @@ function renderAdminProducts() {
   var cat  = document.getElementById('adminCatFilter').value;
   var list = products[cat] || [];
   var html = '';
+
+  // Barra de seleção em massa
+  if (list.length > 0) {
+    html += '<div class="admin-bulk-bar" id="adminBulkBar">';
+    html += '<label><input type="checkbox" id="adminSelectAll" onchange="toggleSelectAll(this)"> Selecionar todos</label>';
+    html += '<span class="admin-bulk-count" id="adminSelCount">0 selecionados</span>';
+    html += '<button class="admin-bulk-del-btn" id="adminBulkDelBtn" onclick="deleteSelectedProducts()">🗑 Excluir selecionados</button>';
+    html += '</div>';
+  }
+
   list.forEach(function(p, i) {
     var ck = cat;
     html += '<div class="admin-prod-item" id="aprod-' + ck + '-' + i + '">';
+    html += '<input type="checkbox" class="admin-prod-check" data-cat="' + ck + '" data-idx="' + i + '" onchange="onProdCheck(this)">';
     html += '<img class="admin-prod-img" src="' + (p.img || '') + '" onerror="this.style.visibility=\'hidden\'">';
     html += '<div class="admin-prod-info"><div class="admin-prod-name">' + escHtml(p.name) + '</div>';
     html += '<div class="admin-prod-cat">' + (CATEGORIES[ck]||ck) + '</div></div>';
@@ -1084,6 +1126,71 @@ function saveEdit(cat, idx) {
     btn.innerHTML = 'Salvar';
     btn.disabled  = false;
     alert('Erro ao salvar: ' + err.message);
+  });
+}
+
+// ── Helpers de seleção em massa ──────────────────────────
+function onProdCheck(chk) {
+  var item = chk.closest('.admin-prod-item');
+  if (chk.checked) item.classList.add('checked');
+  else item.classList.remove('checked');
+  updateBulkBar();
+}
+
+function toggleSelectAll(masterChk) {
+  var boxes = document.querySelectorAll('.admin-prod-check');
+  boxes.forEach(function(b) {
+    b.checked = masterChk.checked;
+    var item = b.closest('.admin-prod-item');
+    if (masterChk.checked) item.classList.add('checked');
+    else item.classList.remove('checked');
+  });
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  var checked = document.querySelectorAll('.admin-prod-check:checked');
+  var total   = document.querySelectorAll('.admin-prod-check');
+  var count   = checked.length;
+  var countEl = document.getElementById('adminSelCount');
+  var btn     = document.getElementById('adminBulkDelBtn');
+  var selAll  = document.getElementById('adminSelectAll');
+  if (countEl) countEl.textContent = count + ' selecionado' + (count !== 1 ? 's' : '');
+  if (btn)     btn.classList.toggle('visible', count > 0);
+  if (selAll) {
+    selAll.indeterminate = count > 0 && count < total.length;
+    selAll.checked = count > 0 && count === total.length;
+  }
+}
+
+function deleteSelectedProducts() {
+  var cat     = document.getElementById('adminCatFilter').value;
+  var checked = document.querySelectorAll('.admin-prod-check:checked');
+  if (!checked.length) return;
+
+  var names = Array.from(checked).map(function(b) {
+    return products[cat][+b.dataset.idx].name;
+  });
+  if (!confirm('Remover ' + checked.length + ' produto(s)?\n\n' + names.join('\n'))) return;
+
+  // Coleta índices em ordem decrescente para deletar sem deslocar
+  var indices = Array.from(checked).map(function(b) { return +b.dataset.idx; });
+  indices.sort(function(a, b) { return b - a; });
+
+  var batch = db.batch();
+  indices.forEach(function(idx) {
+    var p = products[cat][idx];
+    if (p && p.id) batch.delete(db.collection('products').doc(p.id));
+  });
+
+  batch.commit().then(function() {
+    indices.forEach(function(idx) { products[cat].splice(idx, 1); });
+    renderAdminProducts();
+    if (currentCat === cat) renderGrid();
+    showToast(indices.length + ' produto(s) removido(s)');
+  }).catch(function(err) {
+    console.error('Erro ao excluir em massa:', err);
+    showToast('Erro ao excluir. Tente novamente.');
   });
 }
 
