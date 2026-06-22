@@ -1332,7 +1332,11 @@ var WN="5515981151299";var ORIGINAL_CATEGORIES={"pomada-po":"Pomada em Pó","gro
 
 function migrateIfEmpty() {
   db.collection('categories').limit(1).get().then(function(snap) {
-    if (!snap.empty) return; // já tem dados, não migra
+    if (!snap.empty) {
+      // Banco já tem dados — apenas carrega normalmente
+      loadFromFirestore();
+      return;
+    }
     fbStatus('Migrando produtos pela primeira vez…');
     console.log('Firestore vazio — iniciando migração dos produtos originais…');
 
@@ -1344,35 +1348,38 @@ function migrateIfEmpty() {
       batch.set(ref, { name: ORIGINAL_CATEGORIES[k], order: i });
     });
 
-    return batch.commit();
-  }).then(function() {
-    // Migra produtos em lotes
-    var catKeys = Object.keys(ORIGINAL_CATEGORIES);
-    var chain = Promise.resolve();
+    return batch.commit().then(function() {
+      // Migra produtos em lotes
+      var chain = Promise.resolve();
 
-    catKeys.forEach(function(catKey) {
-      var prods = ORIGINAL_PRODUCTS[catKey] || [];
-      chain = chain.then(function() {
-        var b = db.batch();
-        prods.forEach(function(p, i) {
-          var ref = db.collection('products').doc();
-          b.set(ref, {
-            name: p.name || '',
-            price: p.price || '',
-            desc: p.desc || '',
-            img: p.img || '',
-            categoryKey: catKey,
-            order: i
+      catKeys.forEach(function(catKey) {
+        var prods = ORIGINAL_PRODUCTS[catKey] || [];
+        chain = chain.then(function() {
+          var b = db.batch();
+          prods.forEach(function(p, i) {
+            var ref = db.collection('products').doc();
+            b.set(ref, {
+              name: p.name || '',
+              price: p.price || '',
+              desc: p.desc || '',
+              img: p.img || '',
+              categoryKey: catKey,
+              order: i
+            });
           });
+          return b.commit();
         });
-        return b.commit();
       });
-    });
 
-    return chain;
-  }).then(function() {
-    fbStatus('');
-    loadFromFirestore();
+      return chain;
+    }).then(function() {
+      fbStatus('');
+      loadFromFirestore();
+    }).catch(function(e) {
+      console.error('Erro na migração:', e);
+      fbStatus('');
+      loadFromFirestore();
+    });
   }).catch(function(e) {
     console.error('Erro na migração:', e);
     fbStatus('');
